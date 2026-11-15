@@ -1,6 +1,17 @@
 from minidump.constants import MINIDUMP_TYPE
-from minidump.exceptions import MinidumpHeaderFlagsException, MinidumpHeaderSignatureMismatchException
+from minidump.exceptions import MinidumpHeaderFlagsException, MinidumpHeaderSignatureMismatchException, MinidumpMalformedFileException
 import io
+
+HEADER_SIZE = 28
+
+def _read_exact(buff, size):
+	data = buff.read(size)
+	if len(data) != size:
+		raise MinidumpMalformedFileException(
+			'Truncated minidump header: expected %d bytes but only %d were available'
+			% (size, len(data))
+		)
+	return data
 
 # https://msdn.microsoft.com/en-us/library/windows/desktop/ms680378(v=vs.85).aspx
 class MinidumpHeader:
@@ -29,17 +40,20 @@ class MinidumpHeader:
 	@staticmethod
 	def parse(buff):
 		mh = MinidumpHeader()
-		mh.Signature = buff.read(4).decode()[::-1]
+		sig = _read_exact(buff, 4)
+		mh.Signature = sig.decode()[::-1]
 		if mh.Signature != 'PMDM':
 			raise MinidumpHeaderSignatureMismatchException(mh.Signature)
-		mh.Version = int.from_bytes(buff.read(2), byteorder = 'little', signed = False)
-		mh.ImplementationVersion = int.from_bytes(buff.read(2), byteorder = 'little', signed = False)
-		mh.NumberOfStreams = int.from_bytes(buff.read(4), byteorder = 'little', signed = False)
-		mh.StreamDirectoryRva = int.from_bytes(buff.read(4), byteorder = 'little', signed = False)
-		mh.CheckSum = int.from_bytes(buff.read(4), byteorder = 'little', signed = False)
-		mh.TimeDateStamp = int.from_bytes(buff.read(4), byteorder = 'little', signed = False)
+		mh.Version = int.from_bytes(_read_exact(buff, 2), byteorder = 'little', signed = False)
+		mh.ImplementationVersion = int.from_bytes(_read_exact(buff, 2), byteorder = 'little', signed = False)
+		mh.NumberOfStreams = int.from_bytes(_read_exact(buff, 4), byteorder = 'little', signed = False)
+		mh.StreamDirectoryRva = int.from_bytes(_read_exact(buff, 4), byteorder = 'little', signed = False)
+		mh.CheckSum = int.from_bytes(_read_exact(buff, 4), byteorder = 'little', signed = False)
+		mh.TimeDateStamp = int.from_bytes(_read_exact(buff, 4), byteorder = 'little', signed = False)
 		try:
-			mh.Flags = MINIDUMP_TYPE(int.from_bytes(buff.read(4), byteorder = 'little', signed = False))
+			mh.Flags = MINIDUMP_TYPE(int.from_bytes(_read_exact(buff, 4), byteorder = 'little', signed = False))
+		except MinidumpMalformedFileException:
+			raise
 		except Exception as e:
 			raise MinidumpHeaderFlagsException('Could not parse header flags!')
 
@@ -47,7 +61,12 @@ class MinidumpHeader:
 
 	@staticmethod
 	async def aparse(abuff):
-		adata = await abuff.read(32)
+		adata = await abuff.read(HEADER_SIZE)
+		if len(adata) != HEADER_SIZE:
+			raise MinidumpMalformedFileException(
+				'Truncated minidump header: expected %d bytes but only %d were available'
+				% (HEADER_SIZE, len(adata))
+			)
 		buff = io.BytesIO(adata)
 		return MinidumpHeader.parse(buff)
 

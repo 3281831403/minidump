@@ -1,11 +1,12 @@
 
 from minidump.constants import MINIDUMP_STREAM_TYPE
 from minidump.common_structs import MINIDUMP_LOCATION_DESCRIPTOR
+from minidump.exceptions import MinidumpBoundaryException
 
 class MINIDUMP_DIRECTORY:
 	def __init__(self):
-		self.StreamType:MINIDUMP_STREAM_TYPE = None
-		self.Location:MINIDUMP_LOCATION_DESCRIPTOR = None
+		self.StreamType = None
+		self.Location = None
 
 	def to_bytes(self):
 		t = self.StreamType.value.to_bytes(4, byteorder = 'little', signed = False)
@@ -30,14 +31,28 @@ class MINIDUMP_DIRECTORY:
 			return None
 
 		md = MINIDUMP_DIRECTORY()
-		md.StreamType = MINIDUMP_STREAM_TYPE(raw_stream_type_value)
+		if is_stream_supported:
+			md.StreamType = MINIDUMP_STREAM_TYPE(raw_stream_type_value)
+		else:
+			# Unknown but in-range stream type. Keep the raw integer so the
+			# caller can validate its location and then skip it.
+			md.StreamType = raw_stream_type_value
 		md.Location = MINIDUMP_LOCATION_DESCRIPTOR.parse(buff)
+
+		check_rva = getattr(buff, 'check_rva', None)
+		if check_rva is not None:
+			check_rva(md.Location.Rva, md.Location.DataSize, what='stream directory')
 		return md
 
 	@staticmethod
 	async def aparse(buff):
 
 		t = await buff.read(4)
+		if len(t) != 4:
+			from minidump.exceptions import MinidumpMalformedFileException
+			raise MinidumpMalformedFileException(
+				'Truncated stream directory: expected 4 bytes for the stream type but got %d' % len(t)
+			)
 		raw_stream_type_value = int.from_bytes(t, byteorder = 'little', signed = False)
 
 		# StreamType value that are over 0xffff are considered MINIDUMP_USER_STREAM streams
@@ -49,8 +64,15 @@ class MINIDUMP_DIRECTORY:
 			return None
 
 		md = MINIDUMP_DIRECTORY()
-		md.StreamType = MINIDUMP_STREAM_TYPE(raw_stream_type_value)
+		if is_stream_supported:
+			md.StreamType = MINIDUMP_STREAM_TYPE(raw_stream_type_value)
+		else:
+			md.StreamType = raw_stream_type_value
 		md.Location = await MINIDUMP_LOCATION_DESCRIPTOR.aparse(buff)
+
+		check_rva = getattr(buff, 'check_rva', None)
+		if check_rva is not None:
+			check_rva(md.Location.Rva, md.Location.DataSize, what='stream directory')
 		return md
 
 	def __str__(self):

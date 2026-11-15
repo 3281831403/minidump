@@ -6,6 +6,7 @@
 
 import io
 from minidump.common_structs import *
+from minidump.exceptions import MinidumpBoundaryException, MinidumpMalformedFileException
 
 # https://msdn.microsoft.com/en-us/library/windows/desktop/ms680521(v=vs.85).aspx
 class MINIDUMP_UNLOADED_MODULE_LIST:
@@ -129,9 +130,15 @@ class MinidumpUnloadedModuleList:
 	@staticmethod
 	def parse(dir, buff):
 		t = MinidumpUnloadedModuleList()
-		buff.seek(dir.Location.Rva)
-		chunk = io.BytesIO(buff.read(dir.Location.DataSize))
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='UnloadedModuleListStream')
+		chunk = StrictBytesIO(buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='UnloadedModuleListStream'))
 		muml = MINIDUMP_UNLOADED_MODULE_LIST.parse(chunk)
+		available = len(chunk.getbuffer()) - chunk.tell()
+		validate_record_count(
+			muml.NumberOfEntries,
+			24,  # MINIDUMP_UNLOADED_MODULE: 8+4+4+4+4
+			available, what='unloaded module')
 		for _ in range(muml.NumberOfEntries):
 			mod = MINIDUMP_UNLOADED_MODULE.parse(chunk)
 			t.modules.append(MinidumpUnloadedModule.parse(mod, buff))
@@ -141,10 +148,16 @@ class MinidumpUnloadedModuleList:
 	@staticmethod
 	async def aparse(dir, buff):
 		t = MinidumpUnloadedModuleList()
-		await buff.seek(dir.Location.Rva)
-		chunk_data = await buff.read(dir.Location.DataSize)
-		chunk = io.BytesIO(chunk_data)
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='UnloadedModuleListStream')
+		chunk_data = await buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='UnloadedModuleListStream')
+		chunk = StrictBytesIO(chunk_data)
 		muml = MINIDUMP_UNLOADED_MODULE_LIST.parse(chunk)
+		available = len(chunk.getbuffer()) - chunk.tell()
+		validate_record_count(
+			muml.NumberOfEntries,
+			24,  # MINIDUMP_UNLOADED_MODULE: 8+4+4+4+4
+			available, what='unloaded module')
 		for _ in range(muml.NumberOfEntries):
 			mod = MINIDUMP_UNLOADED_MODULE.parse(chunk)
 			dr = await MinidumpUnloadedModule.aparse(mod, buff)

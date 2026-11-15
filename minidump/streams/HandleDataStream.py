@@ -6,6 +6,7 @@
 import io
 import enum
 from minidump.common_structs import *
+from minidump.exceptions import MinidumpBoundaryException, MinidumpMalformedFileException
 from typing import List
 
 # https://msdn.microsoft.com/en-us/library/windows/desktop/ms680372(v=vs.85).aspx
@@ -223,9 +224,14 @@ class MinidumpHandleDataStream:
 	@staticmethod
 	def parse(dir, buff):
 		t = MinidumpHandleDataStream()
-		buff.seek(dir.Location.Rva)
-		chunk = io.BytesIO(buff.read(dir.Location.DataSize))
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='HandleDataStream')
+		chunk = StrictBytesIO(buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='HandleDataStream'))
 		t.header = MINIDUMP_HANDLE_DATA_STREAM.parse(chunk)
+		available = len(chunk.getbuffer()) - chunk.tell()
+		validate_record_count(
+			t.header.NumberOfDescriptors,
+			t.header.SizeOfDescriptor, available, what='handle descriptor')
 		for _ in range(t.header.NumberOfDescriptors):
 			if t.header.SizeOfDescriptor == MINIDUMP_HANDLE_DESCRIPTOR.size:
 				mhd = MINIDUMP_HANDLE_DESCRIPTOR.parse(chunk)
@@ -238,10 +244,15 @@ class MinidumpHandleDataStream:
 	@staticmethod
 	async def aparse(dir, buff):
 		t = MinidumpHandleDataStream()
-		await buff.seek(dir.Location.Rva)
-		chunk_data = await buff.read(dir.Location.DataSize)
-		chunk = io.BytesIO(chunk_data)
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='HandleDataStream')
+		chunk_data = await buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='HandleDataStream')
+		chunk = StrictBytesIO(chunk_data)
 		t.header = MINIDUMP_HANDLE_DATA_STREAM.parse(chunk)
+		available = len(chunk.getbuffer()) - chunk.tell()
+		validate_record_count(
+			t.header.NumberOfDescriptors,
+			t.header.SizeOfDescriptor, available, what='handle descriptor')
 		for _ in range(t.header.NumberOfDescriptors):
 			if t.header.SizeOfDescriptor == MINIDUMP_HANDLE_DESCRIPTOR.size:
 				mhd = MINIDUMP_HANDLE_DESCRIPTOR.parse(chunk)

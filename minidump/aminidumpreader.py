@@ -6,6 +6,7 @@
 import struct
 import ntpath
 from .common_structs import *
+from .exceptions import MinidumpBoundaryException
 from .streams.SystemInfoStream import PROCESSOR_ARCHITECTURE
 
 
@@ -276,15 +277,21 @@ class AMinidumpBufferedReader:
 
 class AMinidumpFileReader:
 	def __init__(self, minidumpfile):
-		self.modules = minidumpfile.modules.modules
+		self.modules = []
+		if minidumpfile.modules is not None:
+			self.modules = minidumpfile.modules.modules
 		self.sysinfo = minidumpfile.sysinfo
 
-		if minidumpfile.memory_segments_64:
+		if minidumpfile.memory_segments_64 is not None:
 			self.memory_segments = minidumpfile.memory_segments_64.memory_segments
 			self.is_fulldump = True
 
-		else:
+		elif minidumpfile.memory_segments is not None:
 			self.memory_segments = minidumpfile.memory_segments.memory_segments
+			self.is_fulldump = False
+
+		else:
+			self.memory_segments = []
 			self.is_fulldump = False
 
 		self.filename = minidumpfile.filename
@@ -293,7 +300,10 @@ class AMinidumpFileReader:
 		#reader params
 		self.sizeof_long = 4
 		self.unpack_long = '<L'
-		if minidumpfile.sysinfo.ProcessorArchitecture in [PROCESSOR_ARCHITECTURE.AMD64, PROCESSOR_ARCHITECTURE.AARCH64]:
+		if self.sysinfo is None:
+			self.sizeof_ptr = 8
+			self.unpack_ptr = '<Q'
+		elif minidumpfile.sysinfo.ProcessorArchitecture in [PROCESSOR_ARCHITECTURE.AMD64, PROCESSOR_ARCHITECTURE.AARCH64]:
 			self.sizeof_ptr = 8
 			self.unpack_ptr = '<Q'
 		elif self.sysinfo.ProcessorArchitecture in [PROCESSOR_ARCHITECTURE.INTEL,
@@ -301,7 +311,7 @@ class AMinidumpFileReader:
 			self.sizeof_ptr = 4
 			self.unpack_ptr = '<L'
 		else:
-			raise Exception('Unknown processor architecture %s! Please fix and submit PR!' % self.sysinfo.ProcessorArchitecture)
+			raise MinidumpBoundaryException('Unknown processor architecture %s! Please fix and submit PR!' % self.sysinfo.ProcessorArchitecture)
 
 	def get_buffered_reader(self, segment_chunk_size = 10*1024):
 		return AMinidumpBufferedReader(self, segment_chunk_size = segment_chunk_size)
@@ -336,5 +346,5 @@ class AMinidumpFileReader:
 		for segment in self.memory_segments:
 			if segment.inrange(virt_addr):
 				return await segment.aread(virt_addr, size, self.file_handle)
-		raise Exception('Address not in memory range! %s' % hex(virt_addr))
+		raise MinidumpBoundaryException('Address not in memory range! %s' % hex(virt_addr))
 

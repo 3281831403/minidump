@@ -6,6 +6,7 @@
 import io
 import enum
 from minidump.common_structs import *
+from minidump.exceptions import MinidumpBoundaryException, MinidumpMalformedFileException
 
 # https://msdn.microsoft.com/en-us/library/windows/desktop/ms680510(v=vs.85).aspx
 class DumpFlags(enum.Enum):
@@ -156,10 +157,14 @@ class MinidumpThreadInfoList:
 	@staticmethod
 	def parse(dir, buff):
 		t = MinidumpThreadInfoList()
-		buff.seek(dir.Location.Rva)
-		data = buff.read(dir.Location.DataSize)
-		chunk = io.BytesIO(data)
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='ThreadInfoListStream')
+		chunk = StrictBytesIO(buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='ThreadInfoListStream'))
 		t.header = MINIDUMP_THREAD_INFO_LIST.parse(chunk)
+		available = len(chunk.getbuffer()) - chunk.tell()
+		validate_record_count(
+			t.header.NumberOfEntries,
+			t.header.SizeOfEntry, available, what='thread info entry')
 		for _ in range(t.header.NumberOfEntries):
 			mi = MINIDUMP_THREAD_INFO.parse(chunk)
 			t.infos.append(MinidumpThreadInfo.parse(mi, buff))
@@ -169,10 +174,15 @@ class MinidumpThreadInfoList:
 	@staticmethod
 	async def aparse(dir, buff):
 		t = MinidumpThreadInfoList()
-		await buff.seek(dir.Location.Rva)
-		data = await buff.read(dir.Location.DataSize)
-		chunk = io.BytesIO(data)
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='ThreadInfoListStream')
+		chunk_data = await buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='ThreadInfoListStream')
+		chunk = StrictBytesIO(chunk_data)
 		t.header = MINIDUMP_THREAD_INFO_LIST.parse(chunk)
+		available = len(chunk.getbuffer()) - chunk.tell()
+		validate_record_count(
+			t.header.NumberOfEntries,
+			t.header.SizeOfEntry, available, what='thread info entry')
 		for _ in range(t.header.NumberOfEntries):
 			mi = MINIDUMP_THREAD_INFO.parse(chunk)
 			t.infos.append(MinidumpThreadInfo.parse(mi, None))

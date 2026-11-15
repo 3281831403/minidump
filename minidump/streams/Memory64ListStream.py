@@ -5,6 +5,7 @@
 #
 import io
 from minidump.common_structs import *
+from minidump.exceptions import MinidumpBoundaryException, MinidumpMalformedFileException
 from typing import List
 
 # https://msdn.microsoft.com/en-us/library/windows/desktop/ms680387(v=vs.85).aspx
@@ -27,17 +28,26 @@ class MINIDUMP_MEMORY64_LIST:
 	@staticmethod
 	def parse(buff):
 		mml = MINIDUMP_MEMORY64_LIST()
-		buffsize = len(buff.read())
-		buff.seek(-buffsize, io.SEEK_CUR)
-		mml.NumberOfMemoryRanges = int.from_bytes(buff.read(8), byteorder = 'little', signed = False)
-		mml.BaseRva = int.from_bytes(buff.read(8), byteorder = 'little', signed = False)
+		cnt_raw = buff.read(8)
+		base_raw = buff.read(8)
+		if len(cnt_raw) != 8 or len(base_raw) != 8:
+			raise MinidumpMalformedFileException(
+				'Truncated MINIDUMP_MEMORY64_LIST header (expected 16 bytes, got %d)'
+				% (len(cnt_raw) + len(base_raw)))
+		mml.NumberOfMemoryRanges = int.from_bytes(cnt_raw, byteorder = 'little', signed = False)
+		mml.BaseRva = int.from_bytes(base_raw, byteorder = 'little', signed = False)
+		available = None
+		if hasattr(buff, 'getbuffer'):
+			available = len(buff.getbuffer()) - buff.tell()
+		elif hasattr(buff, 'file_size'):
+			available = buff.file_size - buff.tell()
+		if available is not None:
+			validate_record_count(
+				mml.NumberOfMemoryRanges,
+				MINIDUMP_MEMORY_DESCRIPTOR64().get_size(),
+				available, what='64-bit memory range')
 		for _ in range(mml.NumberOfMemoryRanges):
 			mml.MemoryRanges.append(MINIDUMP_MEMORY_DESCRIPTOR64.parse(buff))
-
-			#sometimes buggy minidumps have a wrong number of memory ranges, so we need to check if we reached the end of the buffer
-			curpos = buff.tell()
-			if curpos == buffsize:
-				break
 
 		return mml
 
@@ -67,8 +77,14 @@ class MINIDUMP_MEMORY_DESCRIPTOR64:
 	@staticmethod
 	def parse(buff):
 		md = MINIDUMP_MEMORY_DESCRIPTOR64()
-		md.StartOfMemoryRange = int.from_bytes(buff.read(8), byteorder = 'little', signed = False)
-		md.DataSize = int.from_bytes(buff.read(8), byteorder = 'little', signed = False)
+		start_raw = buff.read(8)
+		size_raw = buff.read(8)
+		if len(start_raw) != 8 or len(size_raw) != 8:
+			raise MinidumpMalformedFileException(
+				'Truncated MINIDUMP_MEMORY_DESCRIPTOR64: expected 16 bytes, got %d'
+				% (len(start_raw) + len(size_raw)))
+		md.StartOfMemoryRange = int.from_bytes(start_raw, byteorder = 'little', signed = False)
+		md.DataSize = int.from_bytes(size_raw, byteorder = 'little', signed = False)
 		return md
 
 	def __str__(self):
@@ -83,28 +99,34 @@ class MinidumpMemory64List:
 	@staticmethod
 	def parse(dir, buff):
 		t = MinidumpMemory64List()
-		buff.seek(dir.Location.Rva)
-		chunk = io.BytesIO(buff.read(dir.Location.DataSize))
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='Memory64ListStream')
+		chunk = StrictBytesIO(buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='Memory64ListStream'))
 		mtl = MINIDUMP_MEMORY64_LIST.parse(chunk)
 		rva = mtl.BaseRva
 		for mod in mtl.MemoryRanges:
+			# Every memory region must actually exist in the file; a BaseRva
+			# pointing past EOF is rejected instead of yielding empty bytes.
+			buff.check_rva(rva, mod.DataSize, what='full-memory region data')
 			t.memory_segments.append(MinidumpMemorySegment.parse_full(mod, rva))
 			rva += mod.DataSize
 		return t
 
 	@staticmethod
 	async def aparse(dir, buff):
-		mml = MinidumpMemory64List()
-		await buff.seek(dir.Location.Rva)
-		chunk_data = await buff.read(dir.Location.DataSize)
-		chunk = io.BytesIO(chunk_data)
+		t = MinidumpMemory64List()
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='Memory64ListStream')
+		chunk_data = await buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='Memory64ListStream')
+		chunk = StrictBytesIO(chunk_data)
 		mtl = MINIDUMP_MEMORY64_LIST.parse(chunk)
 		rva = mtl.BaseRva
 		for mod in mtl.MemoryRanges:
+			buff.check_rva(rva, mod.DataSize, what='full-memory region data')
 			ms = MinidumpMemorySegment.parse_full(mod, rva)
-			mml.memory_segments.append(ms)
+			t.memory_segments.append(ms)
 			rva += mod.DataSize
-		return mml
+		return t
 
 	def to_table(self):
 		t = []

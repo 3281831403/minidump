@@ -5,6 +5,7 @@
 #
 import io
 from minidump.common_structs import *
+from minidump.exceptions import MinidumpBoundaryException, MinidumpMalformedFileException
 from minidump.streams.MemoryListStream import MINIDUMP_MEMORY_DESCRIPTOR
 
 # https://msdn.microsoft.com/en-us/library/windows/desktop/ms680515(v=vs.85).aspx
@@ -20,9 +21,28 @@ class MINIDUMP_THREAD_LIST:
 		return t
 
 	@staticmethod
+	def get_record_size():
+		# 4+4+4+4 + 8 (header) + 16 (MINIDUMP_MEMORY_DESCRIPTOR) + 8 (location descriptor)
+		return 48
+
+	@staticmethod
 	def parse(buff):
 		mtl = MINIDUMP_THREAD_LIST()
-		mtl.NumberOfThreads = int.from_bytes(buff.read(4), byteorder = 'little', signed = False)
+		raw = buff.read(4)
+		if len(raw) != 4:
+			raise MinidumpMalformedFileException(
+				'Truncated MINIDUMP_THREAD_LIST: NumberOfThreads could not be read')
+		mtl.NumberOfThreads = int.from_bytes(raw, byteorder = 'little', signed = False)
+		available = None
+		if hasattr(buff, 'getbuffer'):
+			available = len(buff.getbuffer()) - buff.tell()
+		elif hasattr(buff, 'file_size'):
+			available = buff.file_size - buff.tell()
+		if available is not None:
+			validate_record_count(
+				mtl.NumberOfThreads,
+				MINIDUMP_THREAD_LIST.get_record_size(),
+				available, what='thread')
 		for _ in range(mtl.NumberOfThreads):
 			mtl.Threads.append(MINIDUMP_THREAD.parse(buff))
 		return mtl
@@ -91,8 +111,9 @@ class MinidumpThreadList:
 	@staticmethod
 	def parse(dir, buff):
 		t = MinidumpThreadList()
-		buff.seek(dir.Location.Rva)
-		chunk = io.BytesIO(buff.read(dir.Location.DataSize))
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='ThreadListStream')
+		chunk = StrictBytesIO(buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='ThreadListStream'))
 		mtl = MINIDUMP_THREAD_LIST.parse(chunk)
 		t.threads = mtl.Threads
 		return t
@@ -100,9 +121,10 @@ class MinidumpThreadList:
 	@staticmethod
 	async def aparse(dir, buff):
 		t = MinidumpThreadList()
-		await buff.seek(dir.Location.Rva)
-		chunk_data = await buff.read(dir.Location.DataSize)
-		chunk = io.BytesIO(chunk_data)
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='ThreadListStream')
+		chunk_data = await buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='ThreadListStream')
+		chunk = StrictBytesIO(chunk_data)
 		mtl = MINIDUMP_THREAD_LIST.parse(chunk)
 		t.threads = mtl.Threads
 		return t

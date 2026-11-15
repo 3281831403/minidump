@@ -3,6 +3,8 @@
 # Author:
 #  Tamas Jos (@skelsec)
 #
+from minidump.common_structs import StrictBytesIO
+
 class CommentStreamW:
 	def __init__(self):
 		self.data:str = None
@@ -13,15 +15,17 @@ class CommentStreamW:
 	@staticmethod
 	def parse(dir, buff):
 		csa = CommentStreamW()
-		buff.seek(dir.Location.Rva)
-		csa.data = buff.read(dir.Location.DataSize).decode('utf-16-le')
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='CommentStreamW')
+		csa.data = buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='CommentStreamW').decode('utf-16-le')
 		return csa
 
 	@staticmethod
 	async def aparse(dir, buff):
 		csa = CommentStreamW()
-		await buff.seek(dir.Location.Rva)
-		csdata = await buff.read(dir.Location.DataSize)
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='CommentStreamW')
+		csdata = await buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='CommentStreamW')
 		csa.data = csdata.decode('utf-16-le')
 		return csa
 

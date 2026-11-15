@@ -8,6 +8,7 @@ import io
 import enum
 import logging
 from minidump.common_structs import *
+from minidump.exceptions import MinidumpBoundaryException, MinidumpMalformedFileException
 
 MINIDUMP_WIN_BUILDNO_TO_VERSION = {
 	103: 'Windows 3.1',
@@ -177,17 +178,28 @@ class MINIDUMP_SYSTEM_INFO:
 	@staticmethod
 	def parse(buff):
 		msi = MINIDUMP_SYSTEM_INFO()
-		msi.ProcessorArchitecture = PROCESSOR_ARCHITECTURE(int.from_bytes(buff.read(2), byteorder = 'little', signed = False))
+		arch_raw = int.from_bytes(buff.read(2), byteorder = 'little', signed = False)
+		try:
+			msi.ProcessorArchitecture = PROCESSOR_ARCHITECTURE(arch_raw)
+		except ValueError:
+			raise MinidumpMalformedFileException(
+				'Unknown processor architecture value 0x%x in SystemInfoStream' % arch_raw)
 		msi.ProcessorLevel = int.from_bytes(buff.read(2), byteorder = 'little', signed = False)
 		msi.ProcessorRevision = int.from_bytes(buff.read(2), byteorder = 'little', signed = False)
 		#the below field is present in the documentation from MSDN, however is not present in the actual dump
 		#msi.Reserved0 = int.from_bytes(buff.read(2), byteorder = 'little', signed = False)
 		msi.NumberOfProcessors = int.from_bytes(buff.read(1), byteorder = 'little', signed = False)
-		msi.ProductType = PRODUCT_TYPE(int.from_bytes(buff.read(1), byteorder = 'little', signed = False))
+		try:
+			msi.ProductType = PRODUCT_TYPE(int.from_bytes(buff.read(1), byteorder = 'little', signed = False))
+		except ValueError:
+			raise MinidumpMalformedFileException('Invalid ProductType in SystemInfoStream')
 		msi.MajorVersion = int.from_bytes(buff.read(4), byteorder = 'little', signed = False)
 		msi.MinorVersion = int.from_bytes(buff.read(4), byteorder = 'little', signed = False)
 		msi.BuildNumber = int.from_bytes(buff.read(4), byteorder = 'little', signed = False)
-		msi.PlatformId = PLATFORM_ID(int.from_bytes(buff.read(4), byteorder = 'little', signed = False))
+		try:
+			msi.PlatformId = PLATFORM_ID(int.from_bytes(buff.read(4), byteorder = 'little', signed = False))
+		except ValueError:
+			raise MinidumpMalformedFileException('Invalid PlatformId in SystemInfoStream')
 		msi.CSDVersionRva = int.from_bytes(buff.read(4), byteorder = 'little', signed = False)
 		#msi.Reserved1 = int.from_bytes(buff.read(4), byteorder = 'little', signed = False)
 		msi.SuiteMask = SUITE_MASK(int.from_bytes(buff.read(2), byteorder = 'little', signed = False))
@@ -268,8 +280,9 @@ class MinidumpSystemInfo:
 	@staticmethod
 	def parse(dir, buff):
 		t = MinidumpSystemInfo()
-		buff.seek(dir.Location.Rva)
-		chunk = io.BytesIO(buff.read(dir.Location.DataSize))
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='SystemInfoStream')
+		chunk = StrictBytesIO(buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='SystemInfoStream'))
 		si = MINIDUMP_SYSTEM_INFO.parse(chunk)
 		t.ProcessorArchitecture = si.ProcessorArchitecture
 		t.ProcessorLevel = si.ProcessorLevel
@@ -297,9 +310,10 @@ class MinidumpSystemInfo:
 	@staticmethod
 	async def aparse(dir, buff):
 		t = MinidumpSystemInfo()
-		await buff.seek(dir.Location.Rva)
-		chunk_data = await buff.read(dir.Location.DataSize)
-		chunk = io.BytesIO(chunk_data)
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='SystemInfoStream')
+		chunk_data = await buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='SystemInfoStream')
+		chunk = StrictBytesIO(chunk_data)
 		si = MINIDUMP_SYSTEM_INFO.parse(chunk)
 		t.ProcessorArchitecture = si.ProcessorArchitecture
 		t.ProcessorLevel = si.ProcessorLevel

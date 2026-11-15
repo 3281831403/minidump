@@ -6,6 +6,7 @@
 import io
 import enum
 from minidump.common_structs import *
+from minidump.exceptions import MinidumpBoundaryException, MinidumpMalformedFileException
 
 class AllocationProtect(enum.Enum):
 	NONE = 0
@@ -202,10 +203,14 @@ class MinidumpMemoryInfoList:
 	@staticmethod
 	def parse(dir, buff):
 		t = MinidumpMemoryInfoList()
-		buff.seek(dir.Location.Rva)
-		data = buff.read(dir.Location.DataSize)
-		chunk = io.BytesIO(data)
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='MemoryInfoListStream')
+		chunk = StrictBytesIO(buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='MemoryInfoListStream'))
 		t.header = MINIDUMP_MEMORY_INFO_LIST.parse(chunk)
+		available = len(chunk.getbuffer()) - chunk.tell()
+		validate_record_count(
+			t.header.NumberOfEntries,
+			t.header.SizeOfEntry, available, what='memory info entry')
 		for _ in range(t.header.NumberOfEntries):
 			mi = MINIDUMP_MEMORY_INFO.parse(chunk)
 			t.infos.append(MinidumpMemoryInfo.parse(mi, buff))
@@ -215,10 +220,15 @@ class MinidumpMemoryInfoList:
 	@staticmethod
 	async def aparse(dir, buff):
 		t = MinidumpMemoryInfoList()
-		await buff.seek(dir.Location.Rva)
-		data = await buff.read(dir.Location.DataSize)
-		chunk = io.BytesIO(data)
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='MemoryInfoListStream')
+		chunk_data = await buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='MemoryInfoListStream')
+		chunk = StrictBytesIO(chunk_data)
 		t.header = MINIDUMP_MEMORY_INFO_LIST.parse(chunk)
+		available = len(chunk.getbuffer()) - chunk.tell()
+		validate_record_count(
+			t.header.NumberOfEntries,
+			t.header.SizeOfEntry, available, what='memory info entry')
 		for _ in range(t.header.NumberOfEntries):
 			mi = MINIDUMP_MEMORY_INFO.parse(chunk)
 			t.infos.append(MinidumpMemoryInfo.parse(mi, None))

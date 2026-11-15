@@ -5,6 +5,7 @@
 #
 import io
 from minidump.common_structs import *
+from minidump.exceptions import MinidumpBoundaryException, MinidumpMalformedFileException
 
 class MinidumpModule:
 	def __init__(self):
@@ -211,8 +212,23 @@ class MINIDUMP_MODULE_LIST:
 	@staticmethod
 	def parse(buff):
 		mml = MINIDUMP_MODULE_LIST()
-		mml.NumberOfModules = int.from_bytes(buff.read(4), byteorder = 'little', signed = False)
-		for _ in range(mml.NumberOfModules):
+		raw = buff.read(4)
+		if len(raw) != 4:
+			raise MinidumpMalformedFileException(
+				'Truncated MINIDUMP_MODULE_LIST: NumberOfModules could not be read')
+		mml.NumberOfModules = int.from_bytes(raw, byteorder = 'little', signed = False)
+		record_size = MINIDUMP_MODULE().get_size()
+		# The count must fit in the remaining stream bytes; otherwise the
+		# stream is truncated and we must not fabricate zero-filled modules.
+		available = None
+		if hasattr(buff, 'getbuffer'):
+			available = len(buff.getbuffer()) - buff.tell()
+		elif hasattr(buff, 'file_size'):
+			available = buff.file_size - buff.tell()
+		if available is not None:
+			validate_record_count(
+				mml.NumberOfModules, record_size, available, what='module')
+		for i in range(mml.NumberOfModules):
 			mml.Modules.append(MINIDUMP_MODULE.parse(buff))
 
 		return mml
@@ -224,8 +240,9 @@ class MinidumpModuleList:
 	@staticmethod
 	def parse(dir, buff):
 		t = MinidumpModuleList()
-		buff.seek(dir.Location.Rva)
-		chunk = io.BytesIO(buff.read(dir.Location.DataSize))
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='ModuleListStream')
+		chunk = StrictBytesIO(buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='ModuleListStream'))
 		mtl = MINIDUMP_MODULE_LIST.parse(chunk)
 		for mod in mtl.Modules:
 			t.modules.append(MinidumpModule.parse(mod, buff))
@@ -234,9 +251,10 @@ class MinidumpModuleList:
 	@staticmethod
 	async def aparse(dir, buff):
 		t = MinidumpModuleList()
-		await buff.seek(dir.Location.Rva)
-		chunk_data = await buff.read(dir.Location.DataSize)
-		chunk = io.BytesIO(chunk_data)
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='ModuleListStream')
+		chunk_data = await buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='ModuleListStream')
+		chunk = StrictBytesIO(chunk_data)
 		mtl = MINIDUMP_MODULE_LIST.parse(chunk)
 		for mod in mtl.Modules:
 			x = await MinidumpModule.aparse(mod, buff)

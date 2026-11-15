@@ -9,6 +9,7 @@ import io
 import enum
 from typing import List
 from minidump.common_structs import *
+from minidump.exceptions import MinidumpBoundaryException, MinidumpMalformedFileException
 
 # https://msdn.microsoft.com/en-us/library/windows/desktop/ms680368(v=vs.85).aspx
 class MINIDUMP_EXCEPTION_STREAM:
@@ -183,8 +184,9 @@ class ExceptionList:
 	def parse(dir, buff):
 		t = ExceptionList()
 
-		buff.seek(dir.Location.Rva)
-		chunk = io.BytesIO(buff.read(dir.Location.DataSize))
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='ExceptionStream')
+		chunk = StrictBytesIO(buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='ExceptionStream'))
 
 		# Unfortunately, we don't have a certain way to figure out how many exception records
 		# there is in the stream, so we have to fallback on heuristics (EOF or bad data read)
@@ -208,9 +210,10 @@ class ExceptionList:
 	async def aparse(dir, buff):
 		t = ExceptionList()
 
-		await buff.seek(dir.Location.Rva)
-		chunk_data = await buff.read(dir.Location.DataSize)
-		chunk = io.BytesIO(chunk_data)
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='ExceptionStream')
+		chunk_data = await buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='ExceptionStream')
+		chunk = StrictBytesIO(chunk_data)
 
 		# Unfortunately, we don't have a certain way to figure out how many exception records
 		# there is in the stream, so we have to fallback on heuristics (EOF or bad data read)

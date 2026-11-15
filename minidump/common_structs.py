@@ -1,3 +1,144 @@
+import io
+
+from minidump.exceptions import MinidumpBoundaryException, MinidumpMalformedFileException
+
+
+class StrictBytesIO(io.BytesIO):
+	"""
+	BytesIO that refuses to silently return a short (possibly zero-filled)
+	read. Every read that returns fewer bytes than asked for raises
+	MinidumpMalformedFileException instead.
+	"""
+	def read(self, size=-1):
+		if size is None or size < 0:
+			return super().read(size)
+		data = super().read(size)
+		if len(data) != size:
+			raise MinidumpMalformedFileException(
+				'Truncated minidump data: expected %d bytes at offset %d but only %d were available'
+				% (size, self.tell() - len(data), len(data))
+			)
+		return data
+
+
+class BoundedFileReader:
+	"""
+	File-like wrapper that knows the total size of the underlying data and
+	can validate RVAs / ranges before they are used. Reads past the end of
+	the file raise MinidumpBoundaryException or MinidumpMalformedFileException.
+	"""
+	def __init__(self, file_handle, file_size):
+		self.file_handle = file_handle
+		self.file_size = file_size
+
+	def _check_range(self, offset, size, what='data'):
+		if offset is None or offset < 0:
+			raise MinidumpBoundaryException('Invalid %s offset: %s' % (what, offset))
+		if offset > self.file_size:
+			raise MinidumpBoundaryException(
+				'%s offset 0x%x points past end of file (file size 0x%x)'
+				% (what.capitalize(), offset, self.file_size)
+			)
+		if size < 0:
+			raise MinidumpBoundaryException('Invalid %s size: %d' % (what, size))
+		if offset + size > self.file_size:
+			raise MinidumpBoundaryException(
+				'%s range [0x%x + 0x%x = 0x%x] exceeds end of file (file size 0x%x)'
+				% (what.capitalize(), offset, size, offset + size, self.file_size)
+			)
+
+	def check_rva(self, rva, size=0, what='stream'):
+		self._check_range(rva, size, what)
+
+	def tell(self):
+		return self.file_handle.tell()
+
+	def seek(self, offset, whence=0):
+		return self.file_handle.seek(offset, whence)
+
+	def read(self, size=-1):
+		return self.file_handle.read(size)
+
+	def read_range(self, offset, size, what='stream'):
+		self._check_range(offset, size, what)
+		pos = self.file_handle.tell()
+		self.file_handle.seek(offset, 0)
+		data = self.file_handle.read(size)
+		self.file_handle.seek(pos, 0)
+		if len(data) != size:
+			raise MinidumpMalformedFileException(
+				'Truncated %s at offset 0x%x: expected %d bytes, got %d'
+				% (what, offset, size, len(data))
+			)
+		return data
+
+
+class AsyncBoundedFileReader:
+	"""Async counterpart of BoundedFileReader."""
+	def __init__(self, file_handle, file_size):
+		self.file_handle = file_handle
+		self.file_size = file_size
+
+	def _check_range(self, offset, size, what='data'):
+		if offset is None or offset < 0:
+			raise MinidumpBoundaryException('Invalid %s offset: %s' % (what, offset))
+		if offset > self.file_size:
+			raise MinidumpBoundaryException(
+				'%s offset 0x%x points past end of file (file size 0x%x)'
+				% (what.capitalize(), offset, self.file_size)
+			)
+		if size < 0:
+			raise MinidumpBoundaryException('Invalid %s size: %d' % (what, size))
+		if offset + size > self.file_size:
+			raise MinidumpBoundaryException(
+				'%s range [0x%x + 0x%x = 0x%x] exceeds end of file (file size 0x%x)'
+				% (what.capitalize(), offset, size, offset + size, self.file_size)
+			)
+
+	def check_rva(self, rva, size=0, what='stream'):
+		self._check_range(rva, size, what)
+
+	def tell(self):
+		return self.file_handle.tell()
+
+	async def seek(self, offset, whence=0):
+		return await self.file_handle.seek(offset, whence)
+
+	async def read(self, size=-1):
+		return await self.file_handle.read(size)
+
+	async def read_range(self, offset, size, what='stream'):
+		self._check_range(offset, size, what)
+		pos = self.file_handle.tell()
+		await self.file_handle.seek(offset, 0)
+		data = await self.file_handle.read(size)
+		await self.file_handle.seek(pos, 0)
+		if len(data) != size:
+			raise MinidumpMalformedFileException(
+				'Truncated %s at offset 0x%x: expected %d bytes, got %d'
+				% (what, offset, size, len(data))
+			)
+		return data
+
+
+def validate_record_count(count, record_size, available_size, what='record'):
+	"""
+	Verify that `count` fixed-size records of `record_size` bytes each fit
+	into the `available_size` bytes of the enclosing stream. Rejects
+	descriptor counts that point beyond the stream data instead of
+	silently manufacturing zero-filled records.
+	"""
+	if count < 0:
+		raise MinidumpBoundaryException('Invalid negative %s count: %d' % (what, count))
+	if record_size <= 0:
+		raise MinidumpBoundaryException('Invalid %s size: %d' % (what, record_size))
+	needed = count * record_size
+	if needed > available_size:
+		raise MinidumpBoundaryException(
+			'%s count %d requires %d bytes but only %d bytes are available in the stream'
+			% (what.capitalize(), count, needed, available_size)
+		)
+
 
 # https://msdn.microsoft.com/en-us/library/windows/desktop/ms680383(v=vs.85).aspx
 class MINIDUMP_LOCATION_DESCRIPTOR:
@@ -16,17 +157,27 @@ class MINIDUMP_LOCATION_DESCRIPTOR:
 	@staticmethod
 	def parse(buff):
 		mld = MINIDUMP_LOCATION_DESCRIPTOR()
-		mld.DataSize = int.from_bytes(buff.read(4), byteorder = 'little', signed = False)
-		mld.Rva = int.from_bytes(buff.read(4), byteorder = 'little', signed = False)
+		size_raw = buff.read(4)
+		rva_raw = buff.read(4)
+		if len(size_raw) != 4 or len(rva_raw) != 4:
+			raise MinidumpMalformedFileException(
+				'Truncated MINIDUMP_LOCATION_DESCRIPTOR: expected 8 bytes but only %d were available'
+				% (len(size_raw) + len(rva_raw)))
+		mld.DataSize = int.from_bytes(size_raw, byteorder = 'little', signed = False)
+		mld.Rva = int.from_bytes(rva_raw, byteorder = 'little', signed = False)
 		return mld
 
 	@staticmethod
 	async def aparse(buff):
 		mld = MINIDUMP_LOCATION_DESCRIPTOR()
-		t = await buff.read(4)
-		mld.DataSize = int.from_bytes(t, byteorder = 'little', signed = False)
-		t = await buff.read(4)
-		mld.Rva = int.from_bytes(t, byteorder = 'little', signed = False)
+		size_raw = await buff.read(4)
+		rva_raw = await buff.read(4)
+		if len(size_raw) != 4 or len(rva_raw) != 4:
+			raise MinidumpMalformedFileException(
+				'Truncated MINIDUMP_LOCATION_DESCRIPTOR: expected 8 bytes but only %d were available'
+				% (len(size_raw) + len(rva_raw)))
+		mld.DataSize = int.from_bytes(size_raw, byteorder = 'little', signed = False)
+		mld.Rva = int.from_bytes(rva_raw, byteorder = 'little', signed = False)
 		return mld
 
 	def __str__(self):
@@ -80,6 +231,9 @@ class MINIDUMP_STRING:
 	@staticmethod
 	def get_from_rva(rva, buff):
 		pos = buff.tell()
+		check_rva = getattr(buff, 'check_rva', None)
+		if check_rva is not None:
+			check_rva(rva, 0, what='MINIDUMP_STRING')
 		buff.seek(rva, 0)
 		ms = MINIDUMP_STRING.parse(buff)
 		buff.seek(pos, 0)
@@ -91,6 +245,9 @@ class MINIDUMP_STRING:
 	@staticmethod
 	async def aget_from_rva(rva, buff):
 		pos = buff.tell()
+		check_rva = getattr(buff, 'check_rva', None)
+		if check_rva is not None:
+			check_rva(rva, 0, what='MINIDUMP_STRING')
 		await buff.seek(rva, 0)
 		ms = await MINIDUMP_STRING.aparse(buff)
 		await buff.seek(pos, 0)
@@ -135,30 +292,48 @@ class MinidumpMemorySegment:
 
 	def read(self, virtual_address, size, file_handler):
 		if virtual_address > self.end_virtual_address or virtual_address < self.start_virtual_address:
-			raise Exception('Reading from wrong segment!')
+			raise MinidumpBoundaryException('Reading from wrong segment! Virtual address 0x%x is not inside [0x%x, 0x%x)' % (virtual_address, self.start_virtual_address, self.end_virtual_address))
 
 		if virtual_address+size > self.end_virtual_address:
-			raise Exception('Read would cross boundaries!')
+			raise MinidumpBoundaryException('Read would cross boundaries!')
 
 		pos = file_handler.tell()
 		offset = virtual_address - self.start_virtual_address
-		file_handler.seek(self.start_file_address + offset, 0)
+		file_offset = self.start_file_address + offset
+		check_rva = getattr(file_handler, 'check_rva', None)
+		if check_rva is not None:
+			check_rva(file_offset, size, what='memory segment data')
+		file_handler.seek(file_offset, 0)
 		data = file_handler.read(size)
 		file_handler.seek(pos, 0)
+		if len(data) != size:
+			raise MinidumpMalformedFileException(
+				'Truncated memory segment read at file offset 0x%x: expected %d bytes, got %d'
+				% (file_offset, size, len(data))
+			)
 		return data
 
 	async def aread(self, virtual_address, size, file_handler):
 		if virtual_address > self.end_virtual_address or virtual_address < self.start_virtual_address:
-			raise Exception('Reading from wrong segment!')
+			raise MinidumpBoundaryException('Reading from wrong segment! Virtual address 0x%x is not inside [0x%x, 0x%x)' % (virtual_address, self.start_virtual_address, self.end_virtual_address))
 
 		if virtual_address+size > self.end_virtual_address:
-			raise Exception('Read would cross boundaries!')
+			raise MinidumpBoundaryException('Read would cross boundaries!')
 
 		pos = file_handler.tell()
 		offset = virtual_address - self.start_virtual_address
-		await file_handler.seek(self.start_file_address + offset, 0)
+		file_offset = self.start_file_address + offset
+		check_rva = getattr(file_handler, 'check_rva', None)
+		if check_rva is not None:
+			check_rva(file_offset, size, what='memory segment data')
+		await file_handler.seek(file_offset, 0)
 		data = await file_handler.read(size)
 		await file_handler.seek(pos, 0)
+		if len(data) != size:
+			raise MinidumpMalformedFileException(
+				'Truncated memory segment read at file offset 0x%x: expected %d bytes, got %d'
+				% (file_offset, size, len(data))
+			)
 		return data
 
 	def search(self, pattern, file_handler, find_first = False, chunksize = 50*1024):

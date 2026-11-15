@@ -6,6 +6,7 @@
 import io
 import enum
 
+from minidump.common_structs import StrictBytesIO
 #https://msdn.microsoft.com/en-us/library/windows/desktop/ms680388(v=vs.85).aspx
 class MinidumpMiscInfo2Flags1(enum.IntFlag):
 	MINIDUMP_MISC1_PROCESS_ID = 0x00000001 #ProcessId is used.
@@ -103,8 +104,9 @@ class MinidumpMiscInfo:
 	@staticmethod
 	def parse(dir, buff):
 		t = MinidumpMiscInfo()
-		buff.seek(dir.Location.Rva)
-		chunk = io.BytesIO(buff.read(dir.Location.DataSize))
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='MiscInfoStream')
+		chunk = StrictBytesIO(buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='MiscInfoStream'))
 		if dir.Location.DataSize == MINIDUMP_MISC_INFO.size:
 			misc = MINIDUMP_MISC_INFO.parse(chunk)
 			t.ProcessId = misc.ProcessId
@@ -127,9 +129,10 @@ class MinidumpMiscInfo:
 	@staticmethod
 	async def aparse(dir, buff):
 		t = MinidumpMiscInfo()
-		await buff.seek(dir.Location.Rva)
-		chunk_data = await buff.read(dir.Location.DataSize)
-		chunk = io.BytesIO(chunk_data)
+		buff.check_rva(dir.Location.Rva, dir.Location.DataSize, what='MiscInfoStream')
+		chunk_data = await buff.read_range(
+			dir.Location.Rva, dir.Location.DataSize, what='MiscInfoStream')
+		chunk = StrictBytesIO(chunk_data)
 		if dir.Location.DataSize == MINIDUMP_MISC_INFO.size:
 			misc = MINIDUMP_MISC_INFO.parse(chunk)
 			t.ProcessId = misc.ProcessId
